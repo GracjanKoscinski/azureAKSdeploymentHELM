@@ -1,0 +1,10 @@
+replicaCount: 1
+
+image:
+  repository: mytestacrforterraform.azurecr.io/app2
+  tag: latest
+  pullPolicy: Always
+
+service:
+  type: ClusterIP
+  port: 80

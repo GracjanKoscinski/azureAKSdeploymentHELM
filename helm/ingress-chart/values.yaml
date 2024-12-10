@@ -1,0 +1,9 @@
+ingressClassName: webapprouting.kubernetes.azure.com
+
+routes:
+  - path: /app1
+    serviceName: app1-app1-service
+    servicePort: 80
+  - path: /app2
+    serviceName: app2-app2-service
+    servicePort: 80
