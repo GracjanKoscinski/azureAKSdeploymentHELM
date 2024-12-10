@@ -1,0 +1,163 @@
+trigger: none
+
+pool: myAgentPool
+
+variables:
+- group: TerraformVariables
+- name: tag
+  value: "$(Build.BuildId)"
+- name: dockerRegistry
+  value: "mytestacrforterraform.azurecr.io"
+- name: kubernetesNamespace
+  value: "default"
+- name: resource_group_name
+  value: "myTestResourceGroup"
+- name: aks_cluster_name
+  value: "myAKSCluster"
+- name: environment
+  value: "non-prod" #can be changed to prod
+
+stages:
+- stage: TerraformInfrastructureValidation
+  jobs:
+  - job: TerraformInitAndValidate
+    displayName: 'Terraform Init and Validate'
+    steps:
+      - task: TerraformInstaller@1
+        inputs:
+          terraformVersion: '1.10.0'
+      - script: |
+          cd terraform
+          terraform init
+        displayName: 'Terraform Init'
+      - script: |
+          cd terraform
+          terraform validate
+        displayName: 'Terraform Validate'
+
+- stage: TerraformInfrastructureDeployment
+  dependsOn: TerraformInfrastructureValidation
+  condition: succeeded('TerraformInfrastructureValidation')
+  jobs:
+  - job: TerraformPlanAndApply
+    displayName: 'Terraform Plan and Apply'
+    steps:
+      - task: TerraformInstaller@1
+        inputs:
+          terraformVersion: '1.10.0'
+      - script: |
+          cd terraform
+          terraform init
+        displayName: 'Terraform Init'
+      - script: |
+          cd terraform
+          terraform plan -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)" -var-file="$(environment).tfvars"
+        displayName: 'Terraform Plan'
+      - script: |
+          cd terraform
+          terraform apply -auto-approve -var "subscription_id=$(subscription_id)" -var "client_id=$(client_id)" -var "client_secret=$(client_secret)" -var "tenant_id=$(tenant_id)" -var-file="$(environment).tfvars"
+        displayName: 'Terraform Apply'
+      - task: AzureCLI@2
+        inputs:
+          azureSubscription: 'myServiceConnection'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            # Enable Azure Application Gateway Ingress Controller
+            az aks approuting enable --resource-group $(resource_group_name) --name $(aks_cluster_name)
+        displayName: 'Enable AGIC'
+
+- stage: BuildDockerImagesAndDeployToAKS
+  dependsOn: TerraformInfrastructureDeployment
+  condition: succeeded('TerraformInfrastructureDeployment')
+  jobs:
+  - job: BuildAndPushDockerImages
+    displayName: 'Build and Push Docker Images'
+    steps:
+      - task: AzureCLI@2
+        inputs:
+          azureSubscription: 'myServiceConnection'
+          scriptType: 'bash'
+          scriptLocation: 'inlineScript'
+          inlineScript: |
+            # Log in to Azure Container Registry
+            az acr login --name $(dockerRegistry)
+
+            # Build and Push app1
+            docker build -f app1/app1.dockerfile -t $(dockerRegistry)/app1:$(tag) .
+            docker push $(dockerRegistry)/app1:$(tag)
+
+            # Build and Push app2
+            docker build -f app2/app2.dockerfile -t $(dockerRegistry)/app2:$(tag) .
+            docker push $(dockerRegistry)/app2:$(tag)
+        displayName: 'Build and Push Docker Images'
+  - job: DeployToAKS
+    displayName: 'Deploy to AKS'
+    steps:
+      # - task: AzureCLI@2
+      #   inputs:
+      #     azureSubscription: 'myServiceConnection'
+      #     scriptType: 'bash'
+      #     scriptLocation: 'inlineScript'
+      #     inlineScript: |
+      #       # Install kubectl
+      #       curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+      #       chmod +x kubectl
+      #       sudo mv kubectl /usr/local/bin/
+          
+      #       # Get AKS credentials
+      #       az aks get-credentials --resource-group $(resource_group_name) --name $(aks_cluster_name)
+        # displayName: 'Install kubectl and Get AKS Credentials'
+      - task: HelmInstaller@1
+        inputs:
+          helmVersionToInstall: 'latest'
+      - task: HelmDeploy@1
+        inputs:
+          azureSubscriptionEndpoint: 'myServiceConnection'
+          azureResourceGroup: '$(resource_group_name)'
+          kubernetesCluster: '$(aks_cluster_name)'
+          azureSubscriptionForACR: 'myServiceConnection'
+          azureResourceGroupForACR: '$(resource_group_name)'
+          azureContainerRegistry: '$(dockerRegistry)'
+          command: 'upgrade'
+          chartType: 'FilePath'
+          chartPath: 'helm/app1-chart'
+          releaseName: 'app1'
+          namespace: '$(kubernetesNamespace)'
+          overrideValues: 'image.tag=$(tag)'
+          arguments: "--atomic --force --timeout 10m0s --wait"
+        displayName: 'Deploy App1 Helm Chart'
+      
+      - task: HelmDeploy@1
+        inputs:
+          azureSubscriptionEndpoint: 'myServiceConnection'
+          azureResourceGroup: '$(resource_group_name)'
+          kubernetesCluster: '$(aks_cluster_name)'
+          azureSubscriptionForACR: 'myServiceConnection'
+          azureResourceGroupForACR: '$(resource_group_name)'
+          azureContainerRegistry: '$(dockerRegistry)'
+          command: 'upgrade'
+          chartType: 'FilePath'
+          chartPath: 'helm/app2-chart'
+          releaseName: 'app2'
+          namespace: '$(kubernetesNamespace)'
+          overrideValues: 'image.tag=$(tag)'
+          arguments: "--atomic --force --timeout 10m0s --wait"
+        displayName: 'Deploy App2 Helm Chart'
+      
+      - task: HelmDeploy@1
+        inputs:
+          azureSubscriptionEndpoint: 'myServiceConnection'
+          azureResourceGroup: '$(resource_group_name)'
+          kubernetesCluster: '$(aks_cluster_name)'
+          azureSubscriptionForACR: 'myServiceConnection'
+          azureResourceGroupForACR: '$(resource_group_name)'
+          azureContainerRegistry: '$(dockerRegistry)'
+          command: 'upgrade'
+          chartType: 'FilePath'
+          chartPath: 'helm/ingress-chart'
+          releaseName: 'ingress'
+          namespace: '$(kubernetesNamespace)'
+          overrideValues: 'image.tag=$(tag)'
+          arguments: "--atomic --force --timeout 10m0s --wait"
+        displayName: 'Deploy Ingress Helm Chart'
